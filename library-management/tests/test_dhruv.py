@@ -1,15 +1,28 @@
-"""Dhruv's tests for existing Library Management features (Table B).
+"""Dhruv's tests for all existing Library Management features (see Table B).
 
-Features covered:
-  Books: list/search, add, view, update, delete
-  Loans: check out, return, look up loans
+Sections:
+  1. Books and loans   - add/list/search/view/update/delete books, check out, return, look up loans
+  2. Members           - register/list/view/update/delete members
+  3. Renewals and fines
+  4. Reservations
+  5. Web UI pages
 
-Tests marked DEFECT assert the behaviour a reasonable requirement would expect.
-They currently FAIL against the reference app and are kept on purpose; each is
-explained in the report (expected vs. observed). Rename the file if your
-branch/file uses a different name (tests/test_<your-name>.py).
+Tests whose docstring starts with "DEFECT" assert the behaviour the Assignment 1
+requirements call for. They currently FAIL against the reference app on purpose;
+each one is explained in the report (expected vs. observed).
 """
+from datetime import date, timedelta
+
 import pytest
+
+from app import store
+
+
+
+# ======================================================================
+# 1. BOOKS AND LOANS
+# ======================================================================
+
 
 BOOK = {"title": "Clean Code", "author": "Robert C. Martin", "isbn": "978-0132350884", "total_copies": 2}
 
@@ -256,3 +269,286 @@ def test_loans_without_filters_lists_all_including_returned(client):
     client.put(f"/loans/{loan['id']}/return")
     result = client.get("/loans").get_json()
     assert len(result) == 1 and result[0]["return_date"] is not None
+
+
+# ======================================================================
+# 2. MEMBERS
+# ======================================================================
+
+
+MEMBER = {"name": "Ada Lovelace", "email": "ada@example.com"}
+
+
+def create_member(client, **overrides):
+    response = client.post("/members", json={**MEMBER, **overrides})
+    assert response.status_code == 201
+    return response.get_json()
+
+
+def test_create_member_returns_fields_and_membership_date(client):
+    from datetime import date
+
+    member = create_member(client)
+    assert member["id"] == 1
+    assert member["name"] == "Ada Lovelace"
+    assert member["email"] == "ada@example.com"
+    assert member["membership_date"] == date.today().isoformat()
+
+
+def test_list_members_empty_then_populated(client):
+    assert client.get("/members").get_json() == []
+    create_member(client)
+    create_member(client, name="Grace Hopper", email="grace@example.com")
+    assert [m["name"] for m in client.get("/members").get_json()] == ["Ada Lovelace", "Grace Hopper"]
+
+
+def test_get_member_by_id_and_unknown_id_returns_404(client):
+    member = create_member(client)
+    assert client.get(f"/members/{member['id']}").get_json() == member
+    response = client.get("/members/999")
+    assert response.status_code == 404
+    assert "error" in response.get_json()
+
+
+def test_update_member_changes_only_supplied_fields(client):
+    member = create_member(client)
+    response = client.put(f"/members/{member['id']}", json={"email": "new@example.com"})
+    assert response.status_code == 200
+    updated = client.get(f"/members/{member['id']}").get_json()
+    assert updated["email"] == "new@example.com"
+    assert updated["name"] == "Ada Lovelace"
+    assert updated["membership_date"] == member["membership_date"]
+
+
+def test_update_unknown_member_returns_404(client):
+    assert client.put("/members/999", json={"name": "x"}).status_code == 404
+
+
+def test_delete_member_removes_it_and_second_delete_is_404(client):
+    member = create_member(client)
+    assert client.delete(f"/members/{member['id']}").status_code == 204
+    assert client.get(f"/members/{member['id']}").status_code == 404
+    assert client.delete(f"/members/{member['id']}").status_code == 404
+
+
+def test_create_member_missing_email_returns_400(client):
+    """DEFECT: a missing required field raises KeyError -> HTTP 500."""
+    assert client.post("/members", json={"name": "No Email"}).status_code == 400
+
+
+def test_create_member_rejects_invalid_email(client):
+    """DEFECT: any string is accepted as an email address."""
+    assert client.post("/members", json={"name": "Bad", "email": "not-an-email"}).status_code == 400
+
+
+def test_create_member_rejects_duplicate_email(client):
+    """DEFECT: two members can register with the same email."""
+    create_member(client)
+    assert client.post("/members", json=MEMBER).status_code in (400, 409)
+
+
+def test_delete_member_with_active_loan_is_blocked(client):
+    """DEFECT: a member who still has a book can be deleted, orphaning the loan."""
+    book = client.post("/books", json={"title": "T", "author": "A", "isbn": "1"}).get_json()
+    member = create_member(client)
+    client.post("/loans", json={"book_id": book["id"], "member_id": member["id"]})
+    assert client.delete(f"/members/{member['id']}").status_code in (400, 409)
+
+
+# ======================================================================
+# 3. RENEWALS AND FINES
+# ======================================================================
+
+
+def make_loan(client, copies=2):
+    book = client.post("/books", json={"title": "T", "author": "A", "isbn": "1", "total_copies": copies}).get_json()
+    member = client.post("/members", json={"name": "M", "email": "m@example.com"}).get_json()
+    loan = client.post("/loans", json={"book_id": book["id"], "member_id": member["id"]}).get_json()
+    return book, member, loan
+
+
+# ------------------------------------------------------------------ renew
+def test_renew_extends_due_date_by_loan_period(client):
+    _, _, loan = make_loan(client)
+    response = client.put(f"/loans/{loan['id']}/renew")
+    assert response.status_code == 200
+    expected = date.fromisoformat(loan["due_date"]) + timedelta(days=14)
+    assert response.get_json()["due_date"] == expected.isoformat()
+
+
+def test_renew_does_not_change_available_copies(client):
+    book, _, loan = make_loan(client)
+    client.put(f"/loans/{loan['id']}/renew")
+    assert client.get(f"/books/{book['id']}").get_json()["available_copies"] == 1
+
+
+def test_renew_returned_loan_is_rejected(client):
+    _, _, loan = make_loan(client)
+    client.put(f"/loans/{loan['id']}/return")
+    response = client.put(f"/loans/{loan['id']}/renew")
+    assert response.status_code == 400
+
+
+def test_renew_unknown_loan_returns_404(client):
+    assert client.put("/loans/999/renew").status_code == 404
+
+
+def test_renew_is_limited_to_a_maximum_number_of_times(client):
+    """DEFECT: no renewal limit; a loan can be renewed forever."""
+    _, _, loan = make_loan(client)
+    statuses = [client.put(f"/loans/{loan['id']}/renew").status_code for _ in range(10)]
+    assert 400 in statuses or 409 in statuses
+
+
+# ------------------------------------------------------------------- fine
+def test_fine_is_zero_when_not_overdue(client):
+    _, _, loan = make_loan(client)
+    response = client.get(f"/loans/{loan['id']}/fine")
+    assert response.status_code == 200
+    assert response.get_json() == {"loan_id": loan["id"], "fine_amount": 0.0}
+
+
+def test_fine_is_25_cents_per_day_overdue(client):
+    _, _, loan = make_loan(client)
+    store.loans[loan["id"]].due_date = date.today() - timedelta(days=10)
+    assert client.get(f"/loans/{loan['id']}/fine").get_json()["fine_amount"] == 2.5
+
+
+def test_fine_is_zero_on_the_due_date(client):
+    _, _, loan = make_loan(client)
+    store.loans[loan["id"]].due_date = date.today()
+    assert client.get(f"/loans/{loan['id']}/fine").get_json()["fine_amount"] == 0.0
+
+
+def test_fine_unknown_loan_returns_404(client):
+    assert client.get("/loans/999/fine").status_code == 404
+
+
+def test_fine_stops_growing_after_book_is_returned(client):
+    """DEFECT: fine uses today's date even for returned loans.
+
+    Due 10 days ago, returned 8 days ago -> 2 days late -> $0.50, fixed.
+    The app reports $2.50 (10 days) and would keep growing.
+    """
+    _, _, loan = make_loan(client)
+    stored = store.loans[loan["id"]]
+    stored.due_date = date.today() - timedelta(days=10)
+    stored.return_date = date.today() - timedelta(days=8)
+    assert client.get(f"/loans/{loan['id']}/fine").get_json()["fine_amount"] == 0.5
+
+
+# ======================================================================
+# 4. RESERVATIONS
+# ======================================================================
+
+
+def setup_book_and_members(client, copies=1):
+    book = client.post("/books", json={"title": "T", "author": "A", "isbn": "1", "total_copies": copies}).get_json()
+    m1 = client.post("/members", json={"name": "A", "email": "a@example.com"}).get_json()
+    m2 = client.post("/members", json={"name": "B", "email": "b@example.com"}).get_json()
+    return book, m1, m2
+
+
+def test_create_reservation_returns_unfulfilled_reservation(client):
+    from datetime import date
+
+    book, m1, _ = setup_book_and_members(client)
+    response = client.post("/reservations", json={"book_id": book["id"], "member_id": m1["id"]})
+    assert response.status_code == 201
+    data = response.get_json()
+    assert data["book_id"] == book["id"]
+    assert data["member_id"] == m1["id"]
+    assert data["fulfilled"] is False
+    assert data["reservation_date"] == date.today().isoformat()
+
+
+def test_create_reservation_unknown_book_returns_404(client):
+    _, m1, _ = setup_book_and_members(client)
+    assert client.post("/reservations", json={"book_id": 999, "member_id": m1["id"]}).status_code == 404
+
+
+def test_create_reservation_unknown_member_returns_404(client):
+    book, _, _ = setup_book_and_members(client)
+    assert client.post("/reservations", json={"book_id": book["id"], "member_id": 999}).status_code == 404
+
+
+def test_list_reservations_filters_by_book_and_member(client):
+    book, m1, m2 = setup_book_and_members(client)
+    client.post("/reservations", json={"book_id": book["id"], "member_id": m1["id"]})
+    client.post("/reservations", json={"book_id": book["id"], "member_id": m2["id"]})
+    assert len(client.get("/reservations").get_json()) == 2
+    assert len(client.get(f"/reservations?book_id={book['id']}").get_json()) == 2
+    only_m2 = client.get(f"/reservations?member_id={m2['id']}").get_json()
+    assert [r["member_id"] for r in only_m2] == [m2["id"]]
+
+
+def test_list_reservations_empty_initially(client):
+    assert client.get("/reservations").get_json() == []
+
+
+def test_checkout_blocked_for_other_member_when_book_is_reserved(client):
+    """DEFECT: checkout ignores reservations, so member B can take the book reserved by A."""
+    book, m1, m2 = setup_book_and_members(client)
+    client.post("/reservations", json={"book_id": book["id"], "member_id": m1["id"]})
+    response = client.post("/loans", json={"book_id": book["id"], "member_id": m2["id"]})
+    assert response.status_code in (400, 403, 409)
+
+
+def test_reserving_a_book_twice_by_same_member_is_rejected(client):
+    """DEFECT: the same member can create unlimited duplicate reservations."""
+    book, m1, _ = setup_book_and_members(client)
+    client.post("/reservations", json={"book_id": book["id"], "member_id": m1["id"]})
+    response = client.post("/reservations", json={"book_id": book["id"], "member_id": m1["id"]})
+    assert response.status_code in (400, 409)
+
+
+# ======================================================================
+# 5. WEB UI
+# ======================================================================
+
+
+def test_home_and_list_pages_load(client):
+    for path in ("/", "/ui/books", "/ui/members", "/ui/loans"):
+        assert client.get(path).status_code == 200
+
+
+def test_add_book_through_form_then_shows_in_api_and_page(client):
+    response = client.post(
+        "/ui/books",
+        data={"title": "Dune", "author": "Frank Herbert", "isbn": "1", "total_copies": "3"},
+    )
+    assert response.status_code == 302
+    assert "Dune" in client.get("/ui/books").get_data(as_text=True)
+    assert client.get("/books/1").get_json()["available_copies"] == 3
+
+
+def test_delete_book_through_ui(client):
+    client.post("/ui/books", data={"title": "Dune", "author": "F", "isbn": "1", "total_copies": "1"})
+    client.post("/ui/books/1/delete")
+    assert client.get("/books").get_json() == []
+
+
+def test_add_and_delete_member_through_ui(client):
+    client.post("/ui/members", data={"name": "Ada", "email": "ada@example.com"})
+    assert "Ada" in client.get("/ui/members").get_data(as_text=True)
+    client.post("/ui/members/1/delete")
+    assert client.get("/members").get_json() == []
+
+
+def test_checkout_and_return_through_ui_updates_stock(client):
+    client.post("/ui/books", data={"title": "Dune", "author": "F", "isbn": "1", "total_copies": "1"})
+    client.post("/ui/members", data={"name": "Ada", "email": "ada@example.com"})
+    client.post("/ui/loans", data={"book_id": "1", "member_id": "1"})
+    assert client.get("/books/1").get_json()["available_copies"] == 0
+    client.post("/ui/loans/1/return")
+    assert client.get("/books/1").get_json()["available_copies"] == 1
+    assert client.get("/loans/1/fine").status_code == 200
+
+
+def test_ui_checkout_refused_when_no_copies_left(client):
+    """DEFECT: the UI checkout form has no stock check; available_copies goes to -1."""
+    client.post("/ui/books", data={"title": "Dune", "author": "F", "isbn": "1", "total_copies": "1"})
+    client.post("/ui/members", data={"name": "Ada", "email": "ada@example.com"})
+    client.post("/ui/loans", data={"book_id": "1", "member_id": "1"})
+    client.post("/ui/loans", data={"book_id": "1", "member_id": "1"})
+    assert client.get("/books/1").get_json()["available_copies"] >= 0
