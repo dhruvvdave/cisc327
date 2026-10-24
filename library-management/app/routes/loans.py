@@ -6,6 +6,7 @@ from app import store
 from app.models.loan import Loan, LOAN_PERIOD_DAYS
 
 FINE_PER_DAY = 0.25  # dollars charged per day overdue
+MAX_RENEWALS = 2  # renewal limit per loan (a policy value the Director can change)
 
 loans_bp = Blueprint("loans", __name__, url_prefix="/loans")
 
@@ -99,13 +100,28 @@ def return_book(loan_id):
 
 @loans_bp.route("/<int:loan_id>/renew", methods=["PUT"])
 def renew_loan(loan_id):
+    """Renew a loan (final requirement R23).
+
+    Refused with 409 when another member has an unfulfilled reservation on the
+    book, or when the loan has already been renewed MAX_RENEWALS times.
+    """
     loan = store.loans.get(loan_id)
     if loan is None:
         return jsonify({"error": "Loan not found"}), 404
     if loan.return_date is not None:
         return jsonify({"error": "Loan already returned"}), 400
 
+    waiting = [
+        r for r in store.reservations.values()
+        if r.book_id == loan.book_id and not r.fulfilled and r.member_id != loan.member_id
+    ]
+    if waiting:
+        return jsonify({"error": "Book has an active reservation"}), 409
+    if loan.renewal_count >= MAX_RENEWALS:
+        return jsonify({"error": "Renewal limit reached"}), 409
+
     loan.due_date = loan.due_date + timedelta(days=LOAN_PERIOD_DAYS)
+    loan.renewal_count += 1
     return jsonify(loan.to_dict())
 
 
