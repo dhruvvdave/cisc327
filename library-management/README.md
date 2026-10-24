@@ -53,6 +53,7 @@ app working without a REST client, and calls the same in-memory store.
 | DELETE | `/members/<id>` | Delete a member |
 | POST | `/loans` | Check out a book (`book_id`, `member_id`). Returns `400` if either id is missing or not an integer, `404` if the book or member does not exist, `409` if no copies are available or the remaining copies are reserved for other members. A member's own reservation is marked fulfilled on check-out. |
 | PUT | `/loans/<id>/return` | Return a loaned book |
+| PUT | `/loans/<id>/renew` | Renew a loan, extending the due date by 14 days. Returns `404` if the loan does not exist, `400` if it is already returned, and `409` if another member has an unfulfilled reservation on the book or the loan has already been renewed twice (`MAX_RENEWALS`). Loan JSON includes `renewal_count`. |
 | GET | `/loans?member_id=&book_id=` | Look up loans |
 
 ## Tests
