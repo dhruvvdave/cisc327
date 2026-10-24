@@ -22,23 +22,63 @@ def list_loans():
     return jsonify([l.to_dict() for l in results])
 
 
-@loans_bp.route("", methods=["POST"])
-def checkout_book():
-    data = request.get_json()
-    book = store.books.get(data["book_id"])
+def try_checkout(book_id, member_id):
+    """Validate and perform a check-out. Shared by the JSON API and the web UI.
+
+    Returns (loan, None) on success or (None, (message, status_code)) on failure.
+    Rules (final requirement R17):
+      * the book and the member must exist
+      * the book must have at least one available copy
+      * copies held back by other members' unfulfilled reservations are not
+        available to this member
+    A member who holds a reservation for the book may check it out, which marks
+    that reservation as fulfilled.
+    """
+    book = store.books.get(book_id)
     if book is None:
-        return jsonify({"error": "Book not found"}), 404
+        return None, ("Book not found", 404)
+    if member_id not in store.members:
+        return None, ("Member not found", 404)
+
+    if book.available_copies <= 0:
+        return None, ("No copies available", 409)
+
+    open_reservations = [
+        r for r in store.reservations.values()
+        if r.book_id == book_id and not r.fulfilled
+    ]
+    own = [r for r in open_reservations if r.member_id == member_id]
+    held_for_others = len(open_reservations) - len(own)
+    if not own and held_for_others >= book.available_copies:
+        return None, ("Remaining copies are reserved for other members", 409)
 
     book.available_copies -= 1
+    if own:
+        own[0].fulfilled = True
 
     loan_id = store.next_id("loan")
     loan = Loan(
         id=loan_id,
-        book_id=data["book_id"],
-        member_id=data["member_id"],
+        book_id=book_id,
+        member_id=member_id,
         due_date=Loan.default_due_date(),
     )
     store.loans[loan_id] = loan
+    return loan, None
+
+
+@loans_bp.route("", methods=["POST"])
+def checkout_book():
+    data = request.get_json(silent=True) or {}
+    book_id = data.get("book_id")
+    member_id = data.get("member_id")
+    if not isinstance(book_id, int) or not isinstance(member_id, int):
+        return jsonify({"error": "book_id and member_id (integers) are required"}), 400
+
+    loan, error = try_checkout(book_id, member_id)
+    if error is not None:
+        message, status = error
+        return jsonify({"error": message}), status
     return jsonify(loan.to_dict()), 201
 
 

@@ -51,7 +51,7 @@ app working without a REST client, and calls the same in-memory store.
 | GET | `/members/<id>` | Get one member |
 | PUT | `/members/<id>` | Update a member |
 | DELETE | `/members/<id>` | Delete a member |
-| POST | `/loans` | Check out a book (`book_id`, `member_id`) |
+| POST | `/loans` | Check out a book (`book_id`, `member_id`). Returns `400` if either id is missing or not an integer, `404` if the book or member does not exist, `409` if no copies are available or the remaining copies are reserved for other members. A member's own reservation is marked fulfilled on check-out. |
 | PUT | `/loans/<id>/return` | Return a loaned book |
 | GET | `/loans?member_id=&book_id=` | Look up loans |
 

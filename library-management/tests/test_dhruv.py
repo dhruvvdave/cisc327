@@ -552,3 +552,99 @@ def test_ui_checkout_refused_when_no_copies_left(client):
     client.post("/ui/loans", data={"book_id": "1", "member_id": "1"})
     client.post("/ui/loans", data={"book_id": "1", "member_id": "1"})
     assert client.get("/books/1").get_json()["available_copies"] >= 0
+
+
+# ======================================================================
+# 6. ENHANCEMENT: CHECK-OUT VALIDATION (feature/checkout-validation, R17)
+# ======================================================================
+# A check-out is refused (and changes nothing) when the book or member does not
+# exist, when no copies are left, or when the remaining copies are reserved for
+# other members. A member with their own reservation may check the book out,
+# which marks that reservation as fulfilled.
+
+
+def _checkout(client, book_id, member_id):
+    return client.post("/loans", json={"book_id": book_id, "member_id": member_id})
+
+
+def test_checkout_refused_with_409_and_state_unchanged_when_no_copies_left(client):
+    book = add_book(client, total_copies=1)
+    first, second = add_member(client, "A", "a@x.com"), add_member(client, "B", "b@x.com")
+    assert _checkout(client, book["id"], first["id"]).status_code == 201
+
+    response = _checkout(client, book["id"], second["id"])
+
+    assert response.status_code == 409
+    assert "error" in response.get_json()
+    assert client.get(f"/books/{book['id']}").get_json()["available_copies"] == 0
+    assert len(client.get("/loans").get_json()) == 1  # no second loan was created
+
+
+def test_checkout_unknown_member_returns_404_and_keeps_stock(client):
+    book = add_book(client, total_copies=2)
+    response = _checkout(client, book["id"], 999)
+    assert response.status_code == 404
+    assert client.get(f"/books/{book['id']}").get_json()["available_copies"] == 2
+    assert client.get("/loans").get_json() == []
+
+
+def test_checkout_missing_or_non_integer_ids_return_400(client):
+    assert client.post("/loans", json={"book_id": 1}).status_code == 400
+    assert client.post("/loans", json={"book_id": "one", "member_id": 1}).status_code == 400
+    assert client.post("/loans", data="not json").status_code == 400
+
+
+def test_checkout_blocked_for_non_reserving_member_when_last_copy_is_reserved(client):
+    book = add_book(client, total_copies=1)
+    reserver, other = add_member(client, "R", "r@x.com"), add_member(client, "O", "o@x.com")
+    client.post("/reservations", json={"book_id": book["id"], "member_id": reserver["id"]})
+
+    response = _checkout(client, book["id"], other["id"])
+
+    assert response.status_code == 409
+    assert client.get(f"/books/{book['id']}").get_json()["available_copies"] == 1
+
+
+def test_reserving_member_can_check_out_and_reservation_is_fulfilled(client):
+    book = add_book(client, total_copies=1)
+    reserver = add_member(client, "R", "r@x.com")
+    client.post("/reservations", json={"book_id": book["id"], "member_id": reserver["id"]})
+
+    response = _checkout(client, book["id"], reserver["id"])
+
+    assert response.status_code == 201
+    reservation = client.get(f"/reservations?member_id={reserver['id']}").get_json()[0]
+    assert reservation["fulfilled"] is True
+    assert client.get(f"/books/{book['id']}").get_json()["available_copies"] == 0
+
+
+def test_spare_copy_beyond_reservations_can_still_be_borrowed(client):
+    """2 copies, 1 reservation by someone else: one copy stays free for others."""
+    book = add_book(client, total_copies=2)
+    reserver, other, third = (add_member(client, n, f"{n}@x.com") for n in ("R", "O", "T"))
+    client.post("/reservations", json={"book_id": book["id"], "member_id": reserver["id"]})
+
+    assert _checkout(client, book["id"], other["id"]).status_code == 201   # takes the spare copy
+    assert _checkout(client, book["id"], third["id"]).status_code == 409   # last copy is reserved
+    assert client.get(f"/books/{book['id']}").get_json()["available_copies"] == 1
+
+
+def test_checkout_works_again_after_the_book_is_returned(client):
+    book = add_book(client, total_copies=1)
+    first, second = add_member(client, "A", "a@x.com"), add_member(client, "B", "b@x.com")
+    loan = _checkout(client, book["id"], first["id"]).get_json()
+    assert _checkout(client, book["id"], second["id"]).status_code == 409
+
+    client.put(f"/loans/{loan['id']}/return")
+
+    assert _checkout(client, book["id"], second["id"]).status_code == 201
+
+
+def test_web_ui_checkout_follows_the_same_rules(client):
+    client.post("/ui/books", data={"title": "Dune", "author": "F", "isbn": "1", "total_copies": "1"})
+    client.post("/ui/members", data={"name": "Ada", "email": "ada@example.com"})
+    client.post("/ui/loans", data={"book_id": "1", "member_id": "1"})
+    client.post("/ui/loans", data={"book_id": "1", "member_id": "1"})  # no copies left
+    client.post("/ui/loans", data={"book_id": "1", "member_id": "99"})  # unknown member
+    assert len(client.get("/loans").get_json()) == 1
+    assert client.get("/books/1").get_json()["available_copies"] == 0

@@ -4,8 +4,8 @@ from flask import Blueprint, redirect, render_template, request, url_for
 
 from app import store
 from app.models.book import Book
-from app.models.loan import Loan
 from app.models.member import Member
+from app.routes.loans import try_checkout
 
 views_bp = Blueprint("views", __name__)
 
@@ -60,17 +60,7 @@ def loans_page():
     if request.method == "POST":
         book_id = int(request.form["book_id"])
         member_id = int(request.form["member_id"])
-        book = store.books.get(book_id)
-        if book is not None:
-            book.available_copies -= 1
-            loan_id = store.next_id("loan")
-            loan = Loan(
-                id=loan_id,
-                book_id=book_id,
-                member_id=member_id,
-                due_date=Loan.default_due_date(),
-            )
-            store.loans[loan_id] = loan
+        try_checkout(book_id, member_id)  # invalid check-outs are refused (see loans.py)
         return redirect(url_for("views.loans_page"))
     return render_template("loans.html", loans=store.loans.values())
 
