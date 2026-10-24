@@ -648,3 +648,92 @@ def test_web_ui_checkout_follows_the_same_rules(client):
     client.post("/ui/loans", data={"book_id": "1", "member_id": "99"})  # unknown member
     assert len(client.get("/loans").get_json()) == 1
     assert client.get("/books/1").get_json()["available_copies"] == 0
+
+
+# ======================================================================
+# 7. ENHANCEMENT: RENEWAL RULES (feature/renewal-rules, R23)
+# ======================================================================
+# A loan may be renewed at most MAX_RENEWALS (2) times, and not while another
+# member has an unfulfilled reservation on the book. Refused renewals change
+# nothing.
+
+
+def _loan_for(client, copies=1):
+    book = add_book(client, total_copies=copies)
+    member = add_member(client, "Renewer", "renewer@x.com")
+    loan = client.post("/loans", json={"book_id": book["id"], "member_id": member["id"]}).get_json()
+    return book, member, loan
+
+
+def test_each_renewal_extends_due_date_and_counts_up(client):
+    _, _, loan = _loan_for(client)
+    assert loan["renewal_count"] == 0
+    due = date.fromisoformat(loan["due_date"])
+
+    first = client.put(f"/loans/{loan['id']}/renew").get_json()
+    second = client.put(f"/loans/{loan['id']}/renew").get_json()
+
+    assert first["renewal_count"] == 1
+    assert first["due_date"] == (due + timedelta(days=14)).isoformat()
+    assert second["renewal_count"] == 2
+    assert second["due_date"] == (due + timedelta(days=28)).isoformat()
+
+
+def test_renewal_beyond_the_limit_is_refused_and_loan_is_unchanged(client):
+    _, _, loan = _loan_for(client)
+    client.put(f"/loans/{loan['id']}/renew")
+    client.put(f"/loans/{loan['id']}/renew")
+    before = client.get(f"/loans?book_id={loan['book_id']}").get_json()[0]
+
+    response = client.put(f"/loans/{loan['id']}/renew")
+
+    assert response.status_code == 409
+    assert "limit" in response.get_json()["error"].lower()
+    after = client.get(f"/loans?book_id={loan['book_id']}").get_json()[0]
+    assert after == before
+    assert after["renewal_count"] == 2
+
+
+def test_renewal_refused_while_another_member_has_a_reservation(client):
+    book, _, loan = _loan_for(client)
+    waiting = add_member(client, "Waiting", "waiting@x.com")
+    client.post("/reservations", json={"book_id": book["id"], "member_id": waiting["id"]})
+
+    response = client.put(f"/loans/{loan['id']}/renew")
+
+    assert response.status_code == 409
+    assert "reservation" in response.get_json()["error"].lower()
+    current = client.get(f"/loans?book_id={book['id']}").get_json()[0]
+    assert current["due_date"] == loan["due_date"]
+    assert current["renewal_count"] == 0
+
+
+def test_renewal_allowed_when_the_only_reservation_is_the_borrowers_own(client):
+    book, member, loan = _loan_for(client)
+    client.post("/reservations", json={"book_id": book["id"], "member_id": member["id"]})
+    assert client.put(f"/loans/{loan['id']}/renew").status_code == 200
+
+
+def test_renewal_allowed_again_once_the_other_reservation_is_fulfilled(client):
+    book, _, loan = _loan_for(client, copies=2)
+    waiting = add_member(client, "Waiting", "waiting@x.com")
+    client.post("/reservations", json={"book_id": book["id"], "member_id": waiting["id"]})
+    assert client.put(f"/loans/{loan['id']}/renew").status_code == 409
+
+    # the waiting member borrows the second copy, which fulfils their reservation
+    assert client.post("/loans", json={"book_id": book["id"], "member_id": waiting["id"]}).status_code == 201
+
+    assert client.put(f"/loans/{loan['id']}/renew").status_code == 200
+
+
+def test_renewing_one_loan_does_not_affect_another_loan_of_the_same_book(client):
+    book = add_book(client, total_copies=2)
+    a, b = add_member(client, "A", "a@x.com"), add_member(client, "B", "b@x.com")
+    loan_a = client.post("/loans", json={"book_id": book["id"], "member_id": a["id"]}).get_json()
+    loan_b = client.post("/loans", json={"book_id": book["id"], "member_id": b["id"]}).get_json()
+
+    client.put(f"/loans/{loan_a['id']}/renew")
+
+    loans = {l["id"]: l for l in client.get("/loans").get_json()}
+    assert loans[loan_a["id"]]["renewal_count"] == 1
+    assert loans[loan_b["id"]]["renewal_count"] == 0
