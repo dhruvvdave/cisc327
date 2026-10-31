@@ -5,7 +5,10 @@ from app.models.book import Book
 
 books_bp = Blueprint("books", __name__, url_prefix="/books")
 
-
+##list_books
+## Inputs:N/A
+#Output: A list of books
+## Description: Lists every book within th esearch terms
 @books_bp.route("", methods=["GET"])
 def list_books():
     results = list(store.books.values())
@@ -15,6 +18,11 @@ def list_books():
     return jsonify([b.to_dict() for b in results])
 
 
+
+##create_books
+##Inputs: N/A
+##Outputs: A book element
+##Description: Creates a new book
 @books_bp.route("", methods=["POST"])
 def create_book():
     data = request.get_json()
@@ -31,6 +39,10 @@ def create_book():
     return jsonify(book.to_dict()), 201
 
 
+##get_books
+##Inputs: a Book ID
+##Outputs: A book Element
+##Description: Finds a book based off it's ID, and returns that book
 @books_bp.route("/<int:book_id>", methods=["GET"])
 def get_book(book_id):
     book = store.books.get(book_id)
@@ -39,6 +51,10 @@ def get_book(book_id):
     return jsonify(book.to_dict())
 
 
+##update_books
+##Inputs: A book ID
+##Outputs: A Book element
+##Description: Finds a book based off it's ID and updates it's information
 @books_bp.route("/<int:book_id>", methods=["PUT"])
 def update_book(book_id):
     book = store.books.get(book_id)
@@ -53,6 +69,10 @@ def update_book(book_id):
     return jsonify(book.to_dict())
 
 
+##delete_books
+##Inputs: A book ID
+##Outputs: N/A
+##Description: Finds a book by ID and Deletes it.
 @books_bp.route("/<int:book_id>", methods=["DELETE"])
 def delete_book(book_id):
     book = store.books.pop(book_id, None)
