@@ -14,3 +14,9 @@ venv/
 # OS
 .DS_Store
 Thumbs.db
+
+# Coverage output
+htmlcov/
+.coverage
+library-management/htmlcov/
+library-management/.coverage
