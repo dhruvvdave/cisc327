@@ -35,7 +35,7 @@ app working without a REST client, and calls the same in-memory store.
 
 - **Book**: `id, title, author, isbn, total_copies, available_copies`
 - **Member**: `id, name, email, membership_date`
-- **Loan**: `id, book_id, member_id, loan_date, due_date, return_date`
+- **Loan**: `id, book_id, member_id, loan_date, due_date, return_date, renewal_count, reminded`
 
 ## JSON API Endpoints
 
@@ -54,6 +54,7 @@ app working without a REST client, and calls the same in-memory store.
 | POST | `/loans` | Check out a book (`book_id`, `member_id`). Returns `400` if either id is missing or not an integer, `404` if the book or member does not exist, `409` if no copies are available or the remaining copies are reserved for other members. A member's own reservation is marked fulfilled on check-out. |
 | PUT | `/loans/<id>/return` | Return a loaned book |
 | PUT | `/loans/<id>/renew` | Renew a loan, extending the due date by 14 days. Returns `404` if the loan does not exist, `400` if it is already returned, and `409` if another member has an unfulfilled reservation on the book or the loan has already been renewed twice (`MAX_RENEWALS`). Loan JSON includes `renewal_count`. |
+| PUT | `/loans/<id>/remind` | Send the member an overdue reminder (via `notification_service.send_notification`). Returns `404` if the loan (or its member) does not exist, `400` if the loan is returned, `409` if it is not overdue (no notification goes out in any of these cases). Otherwise `200` with the loan JSON plus `notified` (`true`/`false`). If the notification fails, the request returns `200`, `notified` is `false`, and `reminded` stays `false` so the reminder can be retried. |
 | GET | `/loans?member_id=&book_id=` | Look up loans |
 
 ## Tests
