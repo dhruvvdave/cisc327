@@ -1,7 +1,8 @@
-"""Assignment 3 tests: notification success path and loan workflow.
+"""Assignment 3 tests: overdue reminder notifications and loan/UI coverage.
 
-Notification success path (stub + mock) for the overdue reminder, plus
-coverage-directed tests for the loan workflow (loans.py / loan model).
+Success path (stub True and mock), failure path (stub False), non-trigger
+paths (mock asserts no call), the customized notification service, and
+coverage-directed tests for loans, the web UI, reservations and members.
 
 send_notification is patched where the application uses it:
 app.routes.loans.send_notification.
@@ -185,3 +186,225 @@ def test_returned_book_can_be_checked_out_by_a_different_member(client):
     assert response.status_code == 201
     assert response.get_json()["member_id"] == other["id"]
     assert store.books[book["id"]].available_copies == 0
+
+
+def _make_loan(client, *, days_overdue=3, email="sam@example.com"):
+    book = client.post("/books", json={
+        "title": "Clean Code", "author": "Robert Martin", "isbn": "222",
+        "total_copies": 2}).get_json()
+    member = client.post("/members", json={"name": "Sam", "email": email}).get_json()
+    loan = client.post("/loans", json={
+        "book_id": book["id"], "member_id": member["id"]}).get_json()
+    store.loans[loan["id"]].due_date = date.today() - timedelta(days=days_overdue)
+    return book, member, loan
+
+
+# ------------------------------------------------------- failed notification
+
+def test_stub_failure_reports_not_notified_and_loan_stays_unreminded(client):
+    _, _, loan = _make_loan(client)
+
+    with patch("app.routes.loans.send_notification", return_value=False):
+        response = client.put(f"/loans/{loan['id']}/remind")
+
+    assert response.status_code == 200
+    body = response.get_json()
+    assert body["notified"] is False
+    assert body["reminded"] is False
+    assert store.loans[loan["id"]].reminded is False
+    assert store.loans[loan["id"]].return_date is None
+
+
+def test_failed_send_is_still_attempted_once_with_member_email(client):
+    _, _, loan = _make_loan(client, email="sam@example.com")
+
+    with patch("app.routes.loans.send_notification", return_value=False) as mock_send:
+        response = client.put(f"/loans/{loan['id']}/remind")
+
+    assert response.status_code == 200
+    assert response.get_json()["notified"] is False
+    mock_send.assert_called_once()
+    assert mock_send.call_args.args[0] == "sam@example.com"
+    assert mock_send.call_args.args[1] == "Overdue book reminder"
+
+
+def test_reminder_can_be_retried_after_a_failure(client):
+    _, _, loan = _make_loan(client)
+
+    with patch("app.routes.loans.send_notification", side_effect=[False, True]) as mock_send:
+        first = client.put(f"/loans/{loan['id']}/remind")
+        assert store.loans[loan["id"]].reminded is False
+        second = client.put(f"/loans/{loan['id']}/remind")
+
+    assert first.get_json()["notified"] is False
+    assert second.get_json()["notified"] is True
+    assert store.loans[loan["id"]].reminded is True
+    assert mock_send.call_count == 2
+
+
+def test_simulated_service_outage_is_reported_without_recording_anything(client):
+    notification_service.clear_notifications()
+    try:
+        _, _, loan = _make_loan(client)
+        with patch("notification_service.is_service_available", return_value=False):
+            response = client.put(f"/loans/{loan['id']}/remind")
+
+        assert response.status_code == 200
+        assert response.get_json()["notified"] is False
+        assert store.loans[loan["id"]].reminded is False
+        assert notification_service.get_notifications() == []
+    finally:
+        notification_service.clear_notifications()
+
+
+def test_member_with_invalid_email_is_not_notified(client):
+    notification_service.clear_notifications()
+    try:
+        _, member, loan = _make_loan(client)
+        store.members[member["id"]].email = "not-an-email"
+        response = client.put(f"/loans/{loan['id']}/remind")
+
+        assert response.status_code == 200
+        assert response.get_json()["notified"] is False
+        assert store.loans[loan["id"]].reminded is False
+        assert notification_service.get_notifications() == []
+    finally:
+        notification_service.clear_notifications()
+
+
+# ------------------------------------------------------------ non-trigger paths
+
+def test_loan_not_yet_due_sends_no_notification(client):
+    _, _, loan = _make_loan(client, days_overdue=-5)
+
+    with patch("app.routes.loans.send_notification") as mock_send:
+        response = client.put(f"/loans/{loan['id']}/remind")
+
+    assert response.status_code == 409
+    assert response.get_json() == {"error": "Loan is not overdue"}
+    assert store.loans[loan["id"]].reminded is False
+    mock_send.assert_not_called()
+
+
+def test_loan_due_today_is_not_overdue_and_sends_no_notification(client):
+    _, _, loan = _make_loan(client, days_overdue=0)
+
+    with patch("app.routes.loans.send_notification") as mock_send:
+        response = client.put(f"/loans/{loan['id']}/remind")
+
+    assert response.status_code == 409
+    assert store.loans[loan["id"]].reminded is False
+    mock_send.assert_not_called()
+
+
+def test_returned_loan_sends_no_notification(client):
+    _, _, loan = _make_loan(client)
+    client.put(f"/loans/{loan['id']}/return")
+
+    with patch("app.routes.loans.send_notification") as mock_send:
+        response = client.put(f"/loans/{loan['id']}/remind")
+
+    assert response.status_code == 400
+    assert response.get_json() == {"error": "Loan already returned"}
+    assert store.loans[loan["id"]].reminded is False
+    mock_send.assert_not_called()
+
+
+def test_unknown_loan_returns_404_and_sends_no_notification(client):
+    with patch("app.routes.loans.send_notification") as mock_send:
+        response = client.put("/loans/999/remind")
+
+    assert response.status_code == 404
+    assert response.get_json() == {"error": "Loan not found"}
+    mock_send.assert_not_called()
+
+
+def test_loan_whose_member_no_longer_exists_sends_no_notification(client):
+    _, member, loan = _make_loan(client)
+    store.members.pop(member["id"])
+
+    with patch("app.routes.loans.send_notification") as mock_send:
+        response = client.put(f"/loans/{loan['id']}/remind")
+
+    assert response.status_code == 404
+    assert response.get_json() == {"error": "Member not found"}
+    assert store.loans[loan["id"]].reminded is False
+    mock_send.assert_not_called()
+
+
+def test_renewing_an_overdue_loan_makes_it_ineligible_for_a_reminder(client):
+    _, _, loan = _make_loan(client, days_overdue=3)
+    assert client.put(f"/loans/{loan['id']}/renew").status_code == 200
+
+    with patch("app.routes.loans.send_notification") as mock_send:
+        response = client.put(f"/loans/{loan['id']}/remind")
+
+    assert response.status_code == 409
+    assert store.loans[loan["id"]].reminded is False
+    mock_send.assert_not_called()
+
+
+# ------------------------------------- coverage-directed (books/members/UI/etc.)
+
+def test_ui_return_twice_does_not_double_count_stock(client):
+    book, _, loan = _make_loan(client, days_overdue=0)
+    client.post(f"/ui/loans/{loan['id']}/return")
+    after_first = store.books[book["id"]].available_copies
+    response = client.post(f"/ui/loans/{loan['id']}/return")
+
+    assert response.status_code == 302
+    assert after_first == 2
+    assert store.books[book["id"]].available_copies == 2
+
+
+def test_ui_return_of_unknown_loan_redirects_and_changes_nothing(client):
+    book, _, _ = _make_loan(client, days_overdue=0)
+
+    response = client.post("/ui/loans/999/return")
+
+    assert response.status_code == 302
+    assert response.headers["Location"].endswith("/ui/loans")
+    assert store.books[book["id"]].available_copies == 1
+
+
+def test_ui_return_when_book_was_deleted_still_marks_loan_returned(client):
+    book, _, loan = _make_loan(client, days_overdue=0)
+    store.books.pop(book["id"])
+
+    response = client.post(f"/ui/loans/{loan['id']}/return")
+
+    assert response.status_code == 302
+    assert store.loans[loan["id"]].return_date == date.today()
+
+
+def test_ui_delete_of_unknown_book_and_member_is_harmless(client):
+    book, member, _ = _make_loan(client, days_overdue=0)
+
+    assert client.post("/ui/books/999/delete").status_code == 302
+    assert client.post("/ui/members/999/delete").status_code == 302
+    assert list(store.books) == [book["id"]]
+    assert list(store.members) == [member["id"]]
+
+
+def test_reservation_filters_combine_book_and_member(client):
+    b1 = client.post("/books", json={"title": "A", "author": "x", "isbn": "1"}).get_json()
+    b2 = client.post("/books", json={"title": "B", "author": "y", "isbn": "2"}).get_json()
+    m1 = client.post("/members", json={"name": "M1", "email": "m1@x.com"}).get_json()
+    m2 = client.post("/members", json={"name": "M2", "email": "m2@x.com"}).get_json()
+    for b, m in [(b1, m1), (b1, m2), (b2, m1)]:
+        client.post("/reservations", json={"book_id": b["id"], "member_id": m["id"]})
+
+    result = client.get(f"/reservations?book_id={b1['id']}&member_id={m1['id']}").get_json()
+
+    assert len(result) == 1
+    assert (result[0]["book_id"], result[0]["member_id"]) == (b1["id"], m1["id"])
+
+
+def test_member_update_changes_email_and_is_visible_on_the_members_page(client):
+    member = client.post("/members", json={"name": "Sam", "email": "old@x.com"}).get_json()
+    client.put(f"/members/{member['id']}", json={"email": "new@x.com"})
+
+    page = client.get("/ui/members").get_data(as_text=True)
+
+    assert "new@x.com" in page
+    assert "old@x.com" not in page

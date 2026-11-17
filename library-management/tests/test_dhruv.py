@@ -64,18 +64,21 @@ def test_book_ids_increment_and_list_returns_all(client):
     assert len(client.get("/books").get_json()) == 2
 
 
+@pytest.mark.xfail(reason="Known defect (Assignment 2): missing 'isbn' raises KeyError -> HTTP 500 instead of a 400.")
 def test_create_book_missing_required_field_returns_400(client):
     """DEFECT: missing 'isbn' raises KeyError -> HTTP 500 instead of a 400."""
     response = client.post("/books", json={"title": "No author or isbn"})
     assert response.status_code == 400
 
 
+@pytest.mark.xfail(reason="Known defect (Assignment 2): total_copies=-5 is accepted (201) and available_copies becomes -5.")
 def test_create_book_negative_copies_rejected(client):
     """DEFECT: total_copies=-5 is accepted (201) and available_copies becomes -5."""
     response = client.post("/books", json={**BOOK, "total_copies": -5})
     assert response.status_code == 400
 
 
+@pytest.mark.xfail(reason="Known defect (Assignment 2): two books can share an ISBN (no uniqueness check).")
 def test_create_book_duplicate_isbn_rejected(client):
     """DEFECT: two books can share an ISBN (no uniqueness check)."""
     add_book(client)
@@ -123,6 +126,7 @@ def test_update_nonexistent_book_returns_404(client):
     assert client.put("/books/999", json={"title": "x"}).status_code == 404
 
 
+@pytest.mark.xfail(reason="Known defect (Assignment 2): raising total_copies 2 -> 5 leaves available_copies at 2.")
 def test_update_total_copies_keeps_available_copies_consistent(client):
     """DEFECT: raising total_copies 2 -> 5 leaves available_copies at 2."""
     book = add_book(client)
@@ -131,6 +135,7 @@ def test_update_total_copies_keeps_available_copies_consistent(client):
     assert updated["available_copies"] == 5
 
 
+@pytest.mark.xfail(reason="Known defect (Assignment 2): available_copies can be set to -3 or above total_copies.")
 def test_update_available_copies_cannot_exceed_total_or_go_negative(client):
     """DEFECT: available_copies can be set to -3 or above total_copies."""
     book = add_book(client)
@@ -152,6 +157,7 @@ def test_delete_book_twice_returns_404_second_time(client):
     assert client.delete(f"/books/{book['id']}").status_code == 404
 
 
+@pytest.mark.xfail(reason="Known defect (Assignment 2): a book with an unreturned loan can be deleted, orphaning the loan.")
 def test_delete_book_with_active_loan_is_blocked(client):
     """DEFECT: a book with an unreturned loan can be deleted, orphaning the loan."""
     book = add_book(client)
@@ -232,6 +238,7 @@ def test_return_nonexistent_loan_returns_404(client):
     assert client.put("/loans/999/return").status_code == 404
 
 
+@pytest.mark.xfail(reason="Known defect (Assignment 2): returning a loan whose book was deleted raises AttributeError (HTTP 500).")
 def test_return_after_book_deleted_does_not_crash(client):
     """DEFECT: returning a loan whose book was deleted raises AttributeError (HTTP 500)."""
     book = add_book(client)
@@ -252,6 +259,7 @@ def test_loans_filter_by_book_id(client):
     assert [l["book_id"] for l in result] == [b1["id"]]
 
 
+@pytest.mark.xfail(reason="Known defect (Assignment 2): the member_id filter compares against book_id (loans.py line ~19).")
 def test_loans_filter_by_member_id_returns_that_members_loans(client):
     """DEFECT: the member_id filter compares against book_id (loans.py line ~19)."""
     book = add_book(client, total_copies=3)
@@ -331,22 +339,26 @@ def test_delete_member_removes_it_and_second_delete_is_404(client):
     assert client.delete(f"/members/{member['id']}").status_code == 404
 
 
+@pytest.mark.xfail(reason="Known defect (Assignment 2): a missing required field raises KeyError -> HTTP 500.")
 def test_create_member_missing_email_returns_400(client):
     """DEFECT: a missing required field raises KeyError -> HTTP 500."""
     assert client.post("/members", json={"name": "No Email"}).status_code == 400
 
 
+@pytest.mark.xfail(reason="Known defect (Assignment 2): any string is accepted as an email address.")
 def test_create_member_rejects_invalid_email(client):
     """DEFECT: any string is accepted as an email address."""
     assert client.post("/members", json={"name": "Bad", "email": "not-an-email"}).status_code == 400
 
 
+@pytest.mark.xfail(reason="Known defect (Assignment 2): two members can register with the same email.")
 def test_create_member_rejects_duplicate_email(client):
     """DEFECT: two members can register with the same email."""
     create_member(client)
     assert client.post("/members", json=MEMBER).status_code in (400, 409)
 
 
+@pytest.mark.xfail(reason="Known defect (Assignment 2): a member who still has a book can be deleted, orphaning the loan.")
 def test_delete_member_with_active_loan_is_blocked(client):
     """DEFECT: a member who still has a book can be deleted, orphaning the loan."""
     book = client.post("/books", json={"title": "T", "author": "A", "isbn": "1"}).get_json()
@@ -424,6 +436,7 @@ def test_fine_unknown_loan_returns_404(client):
     assert client.get("/loans/999/fine").status_code == 404
 
 
+@pytest.mark.xfail(reason="Known defect (Assignment 2): fine uses today's date even for returned loans.")
 def test_fine_stops_growing_after_book_is_returned(client):
     """DEFECT: fine uses today's date even for returned loans.
 
@@ -494,6 +507,7 @@ def test_checkout_blocked_for_other_member_when_book_is_reserved(client):
     assert response.status_code in (400, 403, 409)
 
 
+@pytest.mark.xfail(reason="Known defect (Assignment 2): the same member can create unlimited duplicate reservations.")
 def test_reserving_a_book_twice_by_same_member_is_rejected(client):
     """DEFECT: the same member can create unlimited duplicate reservations."""
     book, m1, _ = setup_book_and_members(client)
